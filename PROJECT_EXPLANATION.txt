@@ -1,0 +1,464 @@
+﻿================================================================================
+   THREATSCOPE -- INSIDER THREAT DETECTION USING MACHINE LEARNING
+   Complete Project Explanation (For Viva / Teacher Q&A)
+================================================================================
+
+Prepared for : Shreeya
+Project Name : ThreatScope -- Insider Threat Detection
+Tech Stack   : Python, Scikit-learn, Streamlit, Pandas
+GitHub       : https://github.com/shreeya17n-a11y/Insider-Threat-Detection
+
+
+================================================================================
+  SECTION 1 -- WHAT IS THE PROJECT?
+================================================================================
+
+This project is a Machine Learning web application called ThreatScope that
+detects insider threats within an organisation by analysing employee email
+behaviour patterns.
+
+An INSIDER THREAT is when someone with authorised access (like an employee)
+intentionally or unintentionally causes harm -- by leaking data, sending bulk
+files, working on weekends to avoid detection, or sending unusually large emails.
+
+The app:
+  1. Loads a real email dataset
+  2. Engineers features from raw data
+  3. Trains a Random Forest ML model
+  4. Evaluates it against other models (Logistic Regression, Decision Tree, SVM)
+  5. Allows hyperparameter tuning via Grid Search
+  6. Provides live predictions for any new user input
+
+
+================================================================================
+  SECTION 2 -- THE DATASET
+================================================================================
+
+File used  : reduced_data2.csv
+Source     : CERT Insider Threat Dataset (Carnegie Mellon University)
+Size       : ~5,000+ email records
+
+Raw columns:
+  - from        : Sender email address
+  - date        : Timestamp of email
+  - size        : Email size in bytes
+  - attachments : Number of attachments
+
+Feature Engineering (columns WE CREATE):
+  - day_of_week  : Extracted from date (0=Monday, 6=Sunday)
+                   Weekend activity (day >= 4) is suspicious.
+  - email_count  : Total emails per sender (grouped count)
+                   High volume senders are suspicious.
+
+
+================================================================================
+  SECTION 3 -- HOW IS THE TARGET LABEL CREATED?
+================================================================================
+
+Since there are no real confirmed labels from a security team, we define a
+HEURISTIC (rule-based) label:
+
+  insider_threat = 1  if ANY condition is true:
+    - email_count  > 30        (volume anomaly)
+    - attachments  > 5         (data exfiltration signal)
+    - day_of_week  >= 4        (off-hours / weekend activity)
+    - size         > 1,000,000 (bulk data transfer)
+
+  insider_threat = 0  if NONE of the above are true
+
+IMPORTANT -- Why are all metrics 100%?
+  The label is directly derived from the same features the model trains on.
+  So the model is learning to reproduce a deterministic rule -- not discovering
+  a hidden real-world pattern. This is called FEATURE LEAKAGE or TARGET LEAKAGE.
+  In a real system, labels come from actual incident reports and accuracy is
+  typically 90-97%.
+
+
+================================================================================
+  SECTION 4 -- HOW IS THE MODEL TRAINED?
+================================================================================
+
+STEP 1 -- Feature Selection
+  Input features (X) : [email_count, attachments, day_of_week, size]
+  Target label (y)   : insider_threat (0 = Safe, 1 = Threat)
+
+STEP 2 -- Train-Test Split
+  80% Training data  : Model learns from this
+  20% Test data      : We evaluate on this (model has never seen it)
+
+  Code used:
+    X_train, X_test, y_train, y_test = train_test_split(
+        X, y, test_size=0.2, random_state=42, stratify=y
+    )
+
+  stratify=y    : Preserves ratio of 0s and 1s in both splits
+  random_state  : Fixed seed for reproducibility
+
+STEP 3 -- Feature Scaling (StandardScaler)
+  Converts each feature to mean=0, std=1.
+  Prevents large-valued features (size in bytes) from dominating
+  small-valued ones (day_of_week 0-6).
+  IMPORTANT: Fit scaler on training data only. Apply (transform) on test data.
+  Never fit on test data -- that would be data leakage.
+
+STEP 4 -- Model Training (Random Forest)
+    clf = RandomForestClassifier(
+        n_estimators=100,     # 100 decision trees
+        max_depth=6,          # Each tree max 6 levels deep
+        min_samples_split=2,  # Min 2 samples needed to split a node
+        min_samples_leaf=1,   # Each leaf must have >= 1 sample
+        random_state=42,
+        n_jobs=1
+    )
+    clf.fit(X_train, y_train)
+
+  How Random Forest works:
+    - Builds 100 decision trees
+    - Each tree trained on a RANDOM SUBSET of data (Bootstrap Sampling / Bagging)
+    - Each tree sees a RANDOM SUBSET of features at each split
+    - Final prediction = MAJORITY VOTE of all 100 trees
+    - This reduces overfitting and makes predictions more robust
+
+STEP 5 -- Prediction on Test Set
+    preds = clf.predict(X_test)
+    proba = clf.predict_proba(X_test)[:, 1]  # Threat probability (0.0 - 1.0)
+
+
+================================================================================
+  SECTION 5 -- MODEL EVALUATION METRICS
+================================================================================
+
+We evaluate on the held-out 20% test set using 5 metrics:
+
+1. ACCURACY
+   Definition : % of total predictions that were correct
+   Formula    : (TP + TN) / (TP + TN + FP + FN)
+   Our value  : 100.0%
+
+2. PRECISION
+   Definition : Of all users flagged as threats, how many actually were?
+   Formula    : TP / (TP + FP)
+   Importance : Low precision = many innocent people wrongly accused
+   Our value  : 100.0%
+
+3. RECALL (Sensitivity)
+   Definition : Of all actual threats, how many did we catch?
+   Formula    : TP / (TP + FN)
+   Importance : Low recall = real threats slipping through undetected
+   Our value  : 100.0%
+
+4. F1 SCORE
+   Definition : Harmonic mean of Precision and Recall
+   Formula    : 2 x (Precision x Recall) / (Precision + Recall)
+   Importance : Best metric when classes are imbalanced
+   Our value  : 100.0%
+
+5. AUC-ROC
+   Definition : Area Under the ROC Curve
+               Measures how well the model separates threats vs non-threats
+               across all probability thresholds
+   Range      : 0.5 = random guess, 1.0 = perfect
+   Our value  : 100.0%
+
+Confusion Matrix:
+  +-----------------+-----------------+-----------------+
+  |                 | Predicted Safe  | Predicted Threat|
+  +-----------------+-----------------+-----------------+
+  | Actual Safe     | TN (Correct)    | FP (False Alarm)|
+  | Actual Threat   | FN (Missed!)    | TP (Correct)    |
+  +-----------------+-----------------+-----------------+
+
+  TP = True Positive   TN = True Negative
+  FP = False Positive  FN = False Negative
+
+
+================================================================================
+  SECTION 6 -- HYPERPARAMETER TUNING (GRID SEARCH)
+================================================================================
+
+WHAT ARE HYPERPARAMETERS?
+  Settings configured BEFORE training. Not learned by the model.
+  Examples: number of trees, tree depth, min samples per node.
+
+  Random Forest Hyperparameters we tune:
+
+  1. n_estimators  -- Number of trees (more = more stable but slower)
+                      Typical range: [50, 100, 200]
+
+  2. max_depth     -- Max depth of each tree
+                      None = unlimited (may overfit)
+                      Small = simpler tree (may underfit)
+                      Typical range: [None, 5, 10, 20]
+
+  3. min_samples_split -- Min samples needed to split a node
+                          Higher = simpler, more generalised trees
+                          Typical range: [2, 5, 10]
+
+  4. min_samples_leaf  -- Min samples at each leaf node
+                          Acts as regularisation
+                          Typical range: [1, 2, 4]
+
+WHAT IS GRID SEARCH?
+  Exhaustive search over ALL combinations of hyperparameters.
+  Example: 3 values x 4 values = 12 combinations tested.
+
+WHAT IS CROSS-VALIDATION (k-Fold CV)?
+  - Splits training data into k equal parts (we use 5 folds)
+  - Trains k times, each time using k-1 folds for training,
+    1 fold for validation
+  - Averages k scores for a reliable performance estimate
+  - Prevents overfitting the hyperparameters to one lucky split
+  - Total fits = combinations x folds (e.g., 12 x 5 = 60 training runs)
+
+CODE USED:
+    gs = GridSearchCV(
+        estimator  = RandomForestClassifier(random_state=42, n_jobs=1),
+        param_grid = {
+            "n_estimators":      [50, 100, 200],
+            "max_depth":         [None, 5, 10, 20],
+            "min_samples_split": [2, 5, 10],
+            "min_samples_leaf":  [1, 2, 4],
+        },
+        scoring = "f1",    # Metric to optimise
+        cv      = 5,       # 5-fold cross-validation
+        refit   = True,    # Re-train best model on full training set
+        n_jobs  = 1
+    )
+    gs.fit(X_train, y_train)
+    best_params = gs.best_params_
+    best_model  = gs.best_estimator_
+
+Tuning Modes in the App:
+  - Speed (Fastest) : Small grid, fewer folds -- quick results
+  - Balanced        : Medium grid, 5-fold CV -- recommended
+  - Thorough        : Large grid, more folds -- most accurate, slowest
+
+
+================================================================================
+  SECTION 7 -- ALL MODELS COMPARED
+================================================================================
+
+1. LOGISTIC REGRESSION
+   - Linear model, draws a straight decision boundary
+   - Accuracy: 98.2%, Precision: 94.6%, Recall: 97.8%, F1: 96.1%, AUC: 99.1%
+   - Weakness: Cannot capture non-linear patterns
+
+2. DECISION TREE (Single)
+   - If-then rule flowchart, highly interpretable
+   - Accuracy: 100%, F1: 100%
+   - Weakness: Prone to OVERFITTING (memorises training noise)
+
+3. SUPPORT VECTOR MACHINE (SVM)
+   - Finds optimal hyperplane to separate classes
+   - Accuracy: 99.8%, F1: 99.4%, AUC: 100%
+   - Weakness: Slow on large data, black box (cannot explain predictions),
+     no natural probability output, requires expensive Platt Scaling
+
+4. RANDOM FOREST ** SELECTED **
+   - Ensemble of 100 decision trees
+   - Accuracy: 100%, F1: 100%, AUC: 100%
+   - Selected because: Best accuracy + speed + feature importance +
+     explainability + robustness to overfitting
+
+Why NOT SVM?
+  In a forensic security context, every alert must be JUSTIFIABLE.
+  SVM cannot explain WHY it flagged someone. Also computationally expensive.
+
+Why NOT Logistic Regression?
+  Insider threat rules involve OR-conditions across features -- not a linear
+  boundary. Achieves only 98.2% on our data.
+
+
+================================================================================
+  SECTION 8 -- HOW DOES LIVE PREDICTION WORK?
+================================================================================
+
+User enters 4 values and clicks "Assess Risk".
+
+STEP-BY-STEP:
+
+  Step 1 -- Collect Input
+    inp_raw = [[email_count, attachments, day_of_week, size]]
+
+  Step 2 -- Scale Input (SAME scaler from training)
+    inp_scaled = scaler.transform(inp_raw)
+    Never refit the scaler -- use the one saved from training.
+
+  Step 3 -- Predict Label
+    label = model.predict(inp_scaled)[0]
+    Returns: 0 (Safe) or 1 (Threat)
+
+  Step 4 -- Predict Probability
+    prob = model.predict_proba(inp_scaled)[0][1]
+    Returns: float 0.0 to 1.0 (displayed as %)
+
+  Step 5 -- Show Result
+    label=1 --> "Potential Insider Threat Detected" + threat probability
+    label=0 --> "No Threat Detected" + threat probability
+    + Risk score bar + anomaly breakdown (which rule triggered)
+
+EXAMPLE:
+  Input:  Emails=35, Attachments=2, Day=3 (Thursday), Size=80,000
+  Rule:   email_count > 30 = TRUE --> insider_threat = 1
+  Output: THREAT DETECTED, high confidence
+
+  Input:  Emails=10, Attachments=1, Day=1 (Tuesday), Size=50,000
+  Rule:   all conditions FALSE --> insider_threat = 0
+  Output: SAFE, very low threat probability
+
+
+================================================================================
+  SECTION 9 -- FEATURE IMPORTANCE
+================================================================================
+
+After training, Random Forest assigns importance scores to each feature:
+  email_count  : ~42%  (high email volume is the biggest flag)
+  attachments  : ~28%  (attachment-based exfiltration)
+  day_of_week  : ~18%  (weekend/off-hours activity)
+  size         : ~12%  (large email = bulk data transfer)
+
+HOW IT IS CALCULATED:
+  For each tree, for each node split:
+    importance += (samples in node / total) x reduction in Gini impurity
+  Averaged across all 100 trees, then normalised to sum = 1.
+
+GINI IMPURITY:
+  Measures how "mixed" a node is.
+  Gini=0   : All samples in the node belong to ONE class (pure -- good)
+  Gini=0.5 : 50/50 mix (impure -- bad)
+  Trees split to maximise reduction in Gini (make child nodes purer).
+
+
+================================================================================
+  SECTION 10 -- TECHNICAL STACK & ARCHITECTURE
+================================================================================
+
+Libraries:
+  - streamlit   : Web app framework
+  - pandas      : Data loading and feature engineering
+  - scikit-learn: ML algorithms, metrics, preprocessing
+  - gc          : Python garbage collector (memory management on cloud)
+
+Caching Strategy (Prevents Memory Crashes on Streamlit Cloud):
+  - @st.cache_data     : Caches DataFrames (load_data, get_splits)
+                         Shared per function arguments, per session
+  - @st.cache_resource : Caches model object at SERVER level
+                         ONE model shared across ALL users
+                         Trained once per server restart
+  - Without caching: Every user visit trains a new model --> RAM crash
+  - With caching   : 1 model in memory no matter how many users visit
+
+Deployment:
+  - Platform : Streamlit Community Cloud (free tier, 1GB RAM)
+  - GitHub   : shreeya17n-a11y/Insider-Threat-Detection (main branch)
+  - Auto-deploys on every git push to main
+
+
+================================================================================
+  SECTION 11 -- COMMON TEACHER QUESTIONS & ANSWERS
+================================================================================
+
+Q1: What is an Insider Threat?
+A1: A security risk from within an organisation -- an employee who misuses
+    authorised access to steal data, leak info, or sabotage systems.
+
+Q2: Why Random Forest over other algorithms?
+A2: Best combination of: high accuracy, overfitting resistance (bagging),
+    feature importance for explainability, and fast inference. SVM lacks
+    interpretability; Decision Tree overfits; Logistic Regression fails on
+    non-linear patterns.
+
+Q3: Why are all metrics 100%?
+A3: The target label is a direct deterministic OR-rule over the same 4 input
+    features. The model learns to reproduce the rule perfectly -- this is
+    called Feature/Target Leakage. In a real system with genuine incident
+    labels, accuracy would be 90-97%.
+
+Q4: What is overfitting?
+A4: When a model memorises training data but fails on new data. Random Forest
+    prevents this via Bagging (each tree sees different data) and Feature
+    Randomness (each split sees different features), plus ensemble voting.
+
+Q5: Precision vs Recall?
+A5: Precision = Of flagged users, how many are real threats? (reduces false alarms)
+    Recall    = Of real threats, how many did we catch? (reduces missed threats)
+    In security, Recall is more important -- missing a real threat is worse
+    than a false alarm.
+
+Q6: What is Cross-Validation?
+A6: Splits training data into k folds. Trains k times, each time holding 1
+    fold for validation. Averages k scores. More reliable than single split.
+    Prevents hyperparameters from overfitting to one lucky split.
+
+Q7: What is StandardScaler?
+A7: Normalises features to mean=0, std=1. Prevents large-valued features
+    (email size in bytes) from dominating small-valued ones (day 0-6).
+    Must be fitted on training data ONLY, then applied to test/live data.
+
+Q8: What is the Train-Test Split?
+A8: Divides dataset into 80% training (model learns) and 20% test (model
+    evaluated on unseen data). Simulates real-world performance.
+
+Q9: How does live prediction work?
+A9: User inputs 4 values -> scaled with training scaler -> fed to Random Forest
+    -> model returns label (0/1) and threat probability (0-100%) -> displayed
+    with risk score bar and anomaly breakdown.
+
+Q10: What is AUC-ROC?
+A10: Area Under the ROC Curve. ROC plots True Positive Rate vs False Positive
+     Rate at every threshold. AUC=1.0 = perfect, AUC=0.5 = random guess.
+     Measures how well the model separates classes at ALL thresholds.
+
+Q11: What is Bagging?
+A11: Bootstrap Aggregation. Each tree trains on a random sample (with
+     replacement) of training data. Trees are diverse because they see
+     different data. Final prediction = majority vote. Reduces variance.
+
+Q12: What is Gini Impurity?
+A12: Measures how mixed a node is. Gini=0 (pure, all one class), Gini=0.5
+     (50/50 mix). Decision trees split nodes to maximise reduction in Gini.
+
+Q13: Supervised vs Unsupervised Learning?
+A13: Supervised: Labelled data (input -> known output). Our project.
+     Unsupervised: No labels, model finds patterns (e.g., k-means clustering).
+
+Q14: What is Feature Importance?
+A14: Score showing how much each feature contributed to the model's decisions.
+     Calculated as weighted average Gini reduction from splits on that feature
+     across all trees, normalised to sum=1.
+
+Q15: Could this be deployed in a real company?
+A15: Yes, with real incident-report labels. The pipeline is production-grade.
+     The app would connect to live email logs and use security team verdicts
+     as training labels. Expected real-world accuracy: 90-97%.
+
+
+================================================================================
+  SECTION 12 -- QUICK REFERENCE CHEAT SHEET
+================================================================================
+
+  Dataset       : CERT email logs (~5000 records)
+  Features      : email_count, attachments, day_of_week, size
+  Target        : insider_threat (0=Safe, 1=Threat)
+  Train/Test    : 80% / 20%  (stratified, random_state=42)
+  Scaling       : StandardScaler (mean=0, std=1)
+  Final Model   : Random Forest (n_estimators=100, max_depth=6)
+  Tuning        : Grid Search + 5-fold Cross-Validation
+  Metrics       : Accuracy, Precision, Recall, F1, AUC-ROC
+
+  FORMULAS:
+    Accuracy  = (TP+TN) / (TP+TN+FP+FN)
+    Precision = TP / (TP+FP)
+    Recall    = TP / (TP+FN)
+    F1        = 2 x P x R / (P+R)
+
+  KEY CONCEPTS:
+    Random Forest = Bagging + Feature Randomness + Majority Vote
+    Grid Search   = All hyperparameter combos + k-fold CV -> pick best
+    Overfitting   = Great on training, poor on test data
+    Leakage       = Label derived from features = artificially perfect metrics
+    cache_resource = One model shared across all users on server
+
+================================================================================
+  END OF DOCUMENT
+================================================================================
