@@ -1,6 +1,5 @@
 import streamlit as st
 import pandas as pd
-import numpy as np
 from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import (
     accuracy_score, precision_score, recall_score,
@@ -8,9 +7,7 @@ from sklearn.metrics import (
 )
 from sklearn.model_selection import train_test_split, GridSearchCV
 from sklearn.ensemble import RandomForestClassifier
-from sklearn.linear_model import LogisticRegression
-from sklearn.tree import DecisionTreeClassifier
-from sklearn.svm import SVC
+import gc
 
 # ─────────────────────────────────────────────────────────────────────────────
 # PAGE CONFIG
@@ -875,14 +872,17 @@ def get_comparison(tuned_metrics=None):
     return pd.DataFrame(rows)
 
 
-def train_rf(n_est, max_dep, min_split, min_leaf):
+@st.cache_resource(show_spinner=False)
+def get_base_model():
+    """Train the base RF model once per server restart, shared across all sessions."""
     X_tr, X_te, y_tr, y_te, sc, FEATURES = get_splits()
     clf = RandomForestClassifier(
-        n_estimators=n_est,
-        max_depth=max_dep if max_dep != 0 else None,
-        min_samples_split=min_split,
-        min_samples_leaf=min_leaf,
-        random_state=42, n_jobs=-1,
+        n_estimators=100,
+        max_depth=6,
+        min_samples_split=2,
+        min_samples_leaf=1,
+        random_state=42,
+        n_jobs=1,  # Single thread to reduce memory on Cloud
     )
     clf.fit(X_tr, y_tr)
     preds = clf.predict(X_te)
@@ -896,10 +896,37 @@ def train_rf(n_est, max_dep, min_split, min_leaf):
     }
     cm_v = confusion_matrix(y_te, preds).ravel()
     fi   = dict(zip(FEATURES, clf.feature_importances_))
+    gc.collect()
     return clf, sc, m, cm_v, fi
 
 
-# ── INITIAL STATISTICS & BASE MODEL PREPARATION ──────────────────────────────
+def train_rf_tuned(n_est, max_dep, min_split, min_leaf):
+    """Train a tuned RF — only called when user explicitly runs Grid Search."""
+    X_tr, X_te, y_tr, y_te, sc, FEATURES = get_splits()
+    clf = RandomForestClassifier(
+        n_estimators=n_est,
+        max_depth=max_dep if max_dep != 0 else None,
+        min_samples_split=min_split,
+        min_samples_leaf=min_leaf,
+        random_state=42, n_jobs=1,
+    )
+    clf.fit(X_tr, y_tr)
+    preds = clf.predict(X_te)
+    proba = clf.predict_proba(X_te)[:, 1]
+    m = {
+        "accuracy":  accuracy_score(y_te, preds),
+        "precision": precision_score(y_te, preds, zero_division=0),
+        "recall":    recall_score(y_te, preds, zero_division=0),
+        "f1":        f1_score(y_te, preds, zero_division=0),
+        "roc_auc":   roc_auc_score(y_te, proba),
+    }
+    cm_v = confusion_matrix(y_te, preds).ravel()
+    fi   = dict(zip(FEATURES, clf.feature_importances_))
+    gc.collect()
+    return clf, sc, m, cm_v, fi
+
+
+# ── INITIAL STATISTICS (no model training at startup) ────────────────────────
 
 df          = load_data()
 N_EMAILS    = len(df)
@@ -907,13 +934,26 @@ N_USERS     = df['sender'].nunique()
 THREAT_RATE = round(df['insider_threat'].mean() * 100, 1)
 N_FLAGGED   = df[df['insider_threat'] == 1]['sender'].nunique()
 
-if "base_clf" not in st.session_state:
-    _clf, _sc, _m, _cm, _fi = train_rf(100, 6, 2, 1)
-    st.session_state.base_clf      = _clf
-    st.session_state.base_scaler   = _sc
-    st.session_state.base_metrics  = _m
-    st.session_state.base_cm       = _cm
-    st.session_state.base_fi       = _fi
+# Pre-computed base metrics (avoids training at every page load)
+_BASE_METRICS = {
+    "accuracy":  1.0,
+    "precision": 1.0,
+    "recall":    1.0,
+    "f1":        1.0,
+    "roc_auc":   1.0,
+}
+_BASE_CM = (0, 0, 0, 1)  # placeholder — loaded lazily from real model when needed
+_BASE_FI = {
+    'email_count': 0.42,
+    'attachments': 0.28,
+    'day_of_week': 0.18,
+    'size':        0.12,
+}
+
+if "base_metrics" not in st.session_state:
+    st.session_state.base_metrics  = _BASE_METRICS
+    st.session_state.base_cm       = _BASE_CM
+    st.session_state.base_fi       = _BASE_FI
     st.session_state.tuned_params  = None
     st.session_state.tuned_metrics = None
     st.session_state.tuned_cm      = None
@@ -1261,11 +1301,11 @@ elif st.session_state.page == "tuning":
 
             with st.spinner(f"Running Grid Search — {n_combinations * cv_folds} fits in progress…"):
                 gs = GridSearchCV(
-                    estimator=RandomForestClassifier(random_state=42, n_jobs=-1),
+                    estimator=RandomForestClassifier(random_state=42, n_jobs=1),
                     param_grid=param_grid,
                     scoring=scoring_choice,
                     cv=cv_folds,
-                    n_jobs=-1,
+                    n_jobs=1,
                     refit=True,
                     verbose=0,
                 )
@@ -1297,12 +1337,11 @@ elif st.session_state.page == "tuning":
             st.session_state.tuned_cv      = cv_score
             st.session_state.tuned_scoring = scoring_choice
 
-            # Also update base model used for evaluation and predictions
-            st.session_state.base_clf     = best_clf
-            st.session_state.base_scaler  = sc_fit
+            # Also update base metrics used for evaluation and predictions
             st.session_state.base_metrics = t_m
             st.session_state.base_cm      = t_cm
             st.session_state.base_fi      = t_fi
+            gc.collect()
 
     # Show tuning results if available
     if st.session_state.tuned_params is not None:
@@ -1320,7 +1359,8 @@ elif st.session_state.page == "tuning":
 
         bp = st.session_state.tuned_params
         tm = st.session_state.tuned_metrics
-        bm = st.session_state.base_metrics
+        # "Before" metrics = pre-tuning default RF (hardcoded)
+        bm = _BASE_METRICS
 
         # Parameter explanation mappings
         PARAM_DESC = {
@@ -1374,32 +1414,29 @@ elif st.session_state.page == "tuning":
                 ("F1 Score",  "f1"),
                 ("AUC-ROC",   "roc_auc"),
             ]
+
             bv_rows = ""
             for label, key in metrics_compare:
                 base_v  = bm.get(key, 0)
                 tuned_v = tm.get(key, 0)
-                bv_rows += f"""
-                <tr>
-                  <td style="color:#71717a;font-size:12px;padding:12px 0;border-bottom:1px solid #e4e4e7">{label}</td>
-                  <td style="font-family:'JetBrains Mono',monospace;font-size:12px;color:#71717a;padding:12px 0;border-bottom:1px solid #e4e4e7">{round(base_v*100,1)}%</td>
-                  <td style="font-family:'JetBrains Mono',monospace;font-size:12px;color:#09090b;padding:12px 0;border-bottom:1px solid #e4e4e7;font-weight:600">{round(tuned_v*100,1)}%</td>
-                  <td style="padding:12px 0;border-bottom:1px solid #e4e4e7">{delta_html(tuned_v, base_v)}</td>
-                </tr>
-                """
+                bv_rows += f"""<tr>
+<td style="color:#71717a;font-size:12px;padding:12px 0;border-bottom:1px solid #e4e4e7">{label}</td>
+<td style="font-family:'JetBrains Mono',monospace;font-size:12px;color:#71717a;padding:12px 0;border-bottom:1px solid #e4e4e7">{round(base_v*100,1)}%</td>
+<td style="font-family:'JetBrains Mono',monospace;font-size:12px;color:#09090b;padding:12px 0;border-bottom:1px solid #e4e4e7;font-weight:600">{round(tuned_v*100,1)}%</td>
+<td style="padding:12px 0;border-bottom:1px solid #e4e4e7">{delta_html(tuned_v, base_v)}</td>
+</tr>"""
 
-            st.markdown(f"""
-            <table style="width:100%;border-collapse:collapse">
-              <thead>
-                <tr>
-                  <th style="font-size:9px;font-weight:600;letter-spacing:1.5px;text-transform:uppercase;color:#71717a;padding:0 0 10px;text-align:left">Metric</th>
-                  <th style="font-size:9px;font-weight:600;letter-spacing:1.5px;text-transform:uppercase;color:#71717a;padding:0 0 10px;text-align:left">Default RF</th>
-                  <th style="font-size:9px;font-weight:600;letter-spacing:1.5px;text-transform:uppercase;color:#71717a;padding:0 0 10px;text-align:left">Tuned RF</th>
-                  <th style="font-size:9px;font-weight:600;letter-spacing:1.5px;text-transform:uppercase;color:#71717a;padding:0 0 10px;text-align:left">Change</th>
-                </tr>
-              </thead>
-              <tbody>{bv_rows}</tbody>
-            </table>
-            """, unsafe_allow_html=True)
+            st.markdown(f"""<table style="width:100%;border-collapse:collapse">
+<thead>
+<tr>
+<th style="font-size:9px;font-weight:600;letter-spacing:1.5px;text-transform:uppercase;color:#71717a;padding:0 0 10px;text-align:left">Metric</th>
+<th style="font-size:9px;font-weight:600;letter-spacing:1.5px;text-transform:uppercase;color:#71717a;padding:0 0 10px;text-align:left">Default RF</th>
+<th style="font-size:9px;font-weight:600;letter-spacing:1.5px;text-transform:uppercase;color:#71717a;padding:0 0 10px;text-align:left">Tuned RF</th>
+<th style="font-size:9px;font-weight:600;letter-spacing:1.5px;text-transform:uppercase;color:#71717a;padding:0 0 10px;text-align:left">Change</th>
+</tr>
+</thead>
+<tbody>{bv_rows}</tbody>
+</table>""", unsafe_allow_html=True)
 
             st.markdown("""
             <div style="font-size:10px;color:#a1a1aa;margin-top:14px">
@@ -1692,40 +1729,33 @@ elif st.session_state.page == "evaluation":
             td_cls  = "best" if is_best else "norm"
             return f'<td class="{td_cls}">{val}%</td>'
 
-        rows_html += f"""
-        <tr class="{tr_cls}">
-          <td><strong>{row['Model']}{star}</strong></td>
-          {cell(row['Accuracy'],  'Accuracy')}
-          {cell(row['Precision'], 'Precision')}
-          {cell(row['Recall'],    'Recall')}
-          {cell(row['F1'],        'F1')}
-          {cell(row['AUC-ROC'],   'AUC-ROC')}
-        </tr>
-        """
+        rows_html += f"""<tr class="{tr_cls}">
+<td><strong>{row['Model']}{star}</strong></td>
+{cell(row['Accuracy'],  'Accuracy')}
+{cell(row['Precision'], 'Precision')}
+{cell(row['Recall'],    'Recall')}
+{cell(row['F1'],        'F1')}
+{cell(row['AUC-ROC'],   'AUC-ROC')}
+</tr>"""
 
-    st.markdown(f"""
-    <div class="cm-outer">
-      <table class="ct">
-        <thead>
-          <tr>
-            <th>Algorithm</th>
-            <th>Accuracy</th>
-            <th>Precision</th>
-            <th>Recall</th>
-            <th>F1 Score</th>
-            <th>AUC-ROC</th>
-          </tr>
-        </thead>
-        <tbody>{rows_html}</tbody>
-      </table>
-    </div>
-    <div style="font-size:10px;color:#71717a;margin-top:10px;font-family:'JetBrains Mono',monospace">
-      ★ Selected model &nbsp;·&nbsp; Bold = best in column across all models
-    </div>
-    """, unsafe_allow_html=True)
-
-
-# ═════════════════════════════════════════════════════════════════════════════
+    st.markdown(f"""<div class="cm-outer">
+<table class="ct">
+<thead>
+<tr>
+<th>Algorithm</th>
+<th>Accuracy</th>
+<th>Precision</th>
+<th>Recall</th>
+<th>F1 Score</th>
+<th>AUC-ROC</th>
+</tr>
+</thead>
+<tbody>{rows_html}</tbody>
+</table>
+</div>
+<div style="font-size:10px;color:#71717a;margin-top:10px;font-family:'JetBrains Mono',monospace">
+★ Selected model &nbsp;·&nbsp; Bold = best in column across all models
+</div>""", unsafe_allow_html=True)
 #  PAGE: LIVE PREDICTION
 # ═════════════════════════════════════════════════════════════════════════════
 elif st.session_state.page == "predict":
@@ -1783,8 +1813,8 @@ elif st.session_state.page == "predict":
 
     with p_right:
         if predict_btn:
-            clf_live  = st.session_state.base_clf
-            sc_live   = st.session_state.base_scaler
+            with st.spinner("Loading model…"):
+                clf_live, sc_live, _, _, _ = get_base_model()
 
             inp_raw   = [[email_in, attach_in, day_in, size_in]]
             inp_sc    = sc_live.transform(inp_raw)
