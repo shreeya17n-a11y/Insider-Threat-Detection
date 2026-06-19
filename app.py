@@ -529,6 +529,9 @@ div[data-btn-primary="true"] > div.stButton > button p {
     font-family: 'JetBrains Mono', monospace;
     font-weight: 700;
 }
+.ct tr.rf-row td.best {
+    color: #ffffff !important;
+}
 .ct td.norm {
     font-family: 'JetBrains Mono', monospace;
 }
@@ -821,13 +824,25 @@ def get_splits():
 
 
 @st.cache_data
-def get_comparison():
+def get_comparison(tuned_params=None):
     X_tr, X_te, y_tr, y_te, sc, _ = get_splits()
+    
+    if tuned_params is not None:
+        depth = tuned_params.get("max_depth")
+        rf_model = RandomForestClassifier(
+            n_estimators=tuned_params.get("n_estimators", 100),
+            max_depth=depth,
+            min_samples_split=tuned_params.get("min_samples_split", 2),
+            min_samples_leaf=tuned_params.get("min_samples_leaf", 1),
+            random_state=42, n_jobs=-1
+        )
+    else:
+        rf_model = RandomForestClassifier(n_estimators=100, max_depth=6, random_state=42, n_jobs=-1)
+
     models = {
         "Logistic Regression": LogisticRegression(max_iter=1000, random_state=42),
         "Decision Tree":       DecisionTreeClassifier(max_depth=6, random_state=42),
-        "Random Forest":       RandomForestClassifier(n_estimators=100, max_depth=6,
-                                                       random_state=42, n_jobs=-1),
+        "Random Forest":       rf_model,
         "SVM":                 SVC(kernel='rbf', probability=True, random_state=42),
     }
     rows = []
@@ -1593,7 +1608,7 @@ elif st.session_state.page == "evaluation":
     """, unsafe_allow_html=True)
 
     with st.spinner("Benchmarking all algorithms…"):
-        comp_df = get_comparison()
+        comp_df = get_comparison(st.session_state.tuned_params)
 
     rows_html = ""
     for _, row in comp_df.iterrows():
